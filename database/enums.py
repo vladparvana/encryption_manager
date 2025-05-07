@@ -3,6 +3,8 @@ from enum import Enum
 class TipAlgoritm(Enum):
     SIMETRIC = "simetric"
     ASIMETRIC = "asimetric"
+    SIMETRIC_LIBRE = "simetric_libre"
+    ASIMETRIC_LIBRE = "asimetric_libre"
 
 class TipCheie(Enum):
     PUBLICA = "publica"
@@ -16,5 +18,5 @@ class StatusFisier(Enum):
 
 class TipFramework(Enum):
     OPENSSL = "openssl"
-    PYCA = "pyca"
-    CRYPTOGRAPHY = "cryptography"
+    LIBRESSL = "libressl"
+    LIBRE_WRAPPER = "libre_wrapper"

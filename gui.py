@@ -269,6 +269,18 @@ class EncryptionManagerGUI:
                 "key_generation": "openssl genrsa -out {private} 2048 && openssl rsa -in {private} -pubout -out {public}",
                 "encrypt_cmd": "openssl pkeyutl -encrypt -pubin -inkey {key} -in {input} -out {output}",
                 "decrypt_cmd": "openssl pkeyutl -decrypt -inkey {key} -in {input} -out {output}"
+            },
+            "AES-Libre": {
+                "type": TipAlgoritm.SIMETRIC_LIBRE,
+                "key_generation": None,  
+                "encrypt_cmd": None,     
+                "decrypt_cmd": None      
+            },
+            "RSA-Libre": {
+                "type": TipAlgoritm.ASIMETRIC_LIBRE,
+                "key_generation": None,  
+                "encrypt_cmd": None,     
+                "decrypt_cmd": None      
             }
         }
         
@@ -276,6 +288,22 @@ class EncryptionManagerGUI:
         print("\nInitializing algorithms in database...")
         db = SessionLocal()
         try:
+            # Initialize LibreWrapper framework
+            libre_fw = db.query(Frameworks).filter(Frameworks.nume_framework == "LibreWrapper").first()
+            if not libre_fw:
+                print("Creating LibreWrapper framework in database...")
+                libre_fw = Frameworks(
+                    id_framework=str(uuid.uuid4()),
+                    nume_framework="LibreWrapper",
+                    tip_framework=TipFramework.LIBRE_WRAPPER,
+                    versiune="1.0",
+                    comanda_criptare="libre_wrapper encrypt",
+                    comanda_decriptare="libre_wrapper decrypt"
+                )
+                db.add(libre_fw)
+                db.commit()
+                print("LibreWrapper framework created with ID:", libre_fw.id_framework)
+
             for algo_name, algo_info in self.algorithms.items():
                 algo = db.query(Algoritmi).filter(Algoritmi.nume_algoritm == algo_name).first()
                 if not algo:
@@ -451,28 +479,19 @@ class EncryptionManagerGUI:
                 if not algo:
                     raise Exception(f"Algorithm {algo_name} not found in database")
                 
-                if algo_info['type'] == TipAlgoritm.SIMETRIC:
-                    # Generate symmetric key
-                    print(f"Running command: {algo_info['key_generation']}")
-                    process = subprocess.run(
-                        algo_info['key_generation'],
-                        shell=True,
-                        capture_output=True,
-                        text=True
-                    )
+                if algo_name in ["AES-Libre", "RSA-Libre"]:
+                    # Use LibreWrapper for key generation
+                    from database.libre_wrapper import LibreWrapper
+                    wrapper = LibreWrapper()
+                    private_key, public_key = wrapper.generate_key(algo_name, dialog.result['name'])
                     
-                    if process.returncode == 0:
-                        # Get the generated key
-                        key_value = process.stdout.strip()
-                        print(f"Generated symmetric key")
-                        
-                        # Save key to database
-                        print("Saving key to database...")
+                    if algo_name == "AES-Libre":
+                        # Save AES key
                         key = Chei(
                             id_cheie=str(uuid.uuid4()),
                             id_algoritm=algo.id_algoritm,
                             nume=dialog.result['name'],
-                            cheie=key_value.encode(),
+                            cheie=private_key,
                             data_creare=datetime.now(),
                             expirare=dialog.result['expiration'],
                             tip_cheie=TipCheie.SECRETA
@@ -480,84 +499,138 @@ class EncryptionManagerGUI:
                         db.add(key)
                         db.commit()
                         print(f"Key saved to database with ID: {key.id_cheie}")
+                    else:  # RSA-Libre
+                        # Save both private and public keys
+                        private_key_obj = Chei(
+                            id_cheie=str(uuid.uuid4()),
+                            id_algoritm=algo.id_algoritm,
+                            nume=f"{dialog.result['name']}_private",
+                            cheie=private_key,
+                            data_creare=datetime.now(),
+                            expirare=dialog.result['expiration'],
+                            tip_cheie=TipCheie.PRIVATA
+                        )
+                        public_key_obj = Chei(
+                            id_cheie=str(uuid.uuid4()),
+                            id_algoritm=algo.id_algoritm,
+                            nume=f"{dialog.result['name']}_public",
+                            cheie=public_key,
+                            data_creare=datetime.now(),
+                            expirare=dialog.result['expiration'],
+                            tip_cheie=TipCheie.PUBLICA
+                        )
+                        db.add(private_key_obj)
+                        db.add(public_key_obj)
+                        db.commit()
+                        print(f"Private key saved with ID: {private_key_obj.id_cheie}")
+                        print(f"Public key saved with ID: {public_key_obj.id_cheie}")
+                else:
+                    # Use existing OpenSSL implementation
+                    if algo_info['type'] == TipAlgoritm.SIMETRIC:
+                        # Generate symmetric key
+                        print(f"Running command: {algo_info['key_generation']}")
+                        process = subprocess.run(
+                            algo_info['key_generation'],
+                            shell=True,
+                            capture_output=True,
+                            text=True
+                        )
                         
-                        self.update_keys_list(algo_name)
-                    else:
-                        raise Exception(f"Key generation failed: {process.stderr}")
-                        
-                else:  # Asymmetric
-                    # Generate temporary files for key pair
-                    temp_dir = "temp_keys"
-                    os.makedirs(temp_dir, exist_ok=True)
-                    private_path = os.path.join(temp_dir, f"private_{uuid.uuid4()}.pem")
-                    public_path = os.path.join(temp_dir, f"public_{uuid.uuid4()}.pem")
-                    
-                    cmd = algo_info['key_generation'].format(
-                        private=private_path,
-                        public=public_path
-                    )
-                    
-                    print(f"Running command: {cmd}")
-                    process = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-                    
-                    if process.returncode == 0:
-                        print("Generated key pair")
-                        
-                        try:
-                            # Read key contents
-                            with open(private_path, 'rb') as f:
-                                private_key_content = f.read()
-                            with open(public_path, 'rb') as f:
-                                public_key_content = f.read()
+                        if process.returncode == 0:
+                            # Get the generated key
+                            key_value = process.stdout.strip()
+                            print(f"Generated symmetric key")
                             
-                            # Save keys to database
-                            print("Saving keys to database...")
-                            
-                            # Save private key
-                            private_key = Chei(
+                            # Save key to database
+                            print("Saving key to database...")
+                            key = Chei(
                                 id_cheie=str(uuid.uuid4()),
                                 id_algoritm=algo.id_algoritm,
-                                nume=f"{dialog.result['name']}_private",
-                                cheie=private_key_content,
+                                nume=dialog.result['name'],
+                                cheie=key_value.encode(),
                                 data_creare=datetime.now(),
                                 expirare=dialog.result['expiration'],
-                                tip_cheie=TipCheie.PRIVATA
+                                tip_cheie=TipCheie.SECRETA
                             )
-                            db.add(private_key)
-                            
-                            # Save public key
-                            public_key = Chei(
-                                id_cheie=str(uuid.uuid4()),
-                                id_algoritm=algo.id_algoritm,
-                                nume=f"{dialog.result['name']}_public",
-                                cheie=public_key_content,
-                                data_creare=datetime.now(),
-                                expirare=dialog.result['expiration'],
-                                tip_cheie=TipCheie.PUBLICA
-                            )
-                            db.add(public_key)
+                            db.add(key)
                             db.commit()
+                            print(f"Key saved to database with ID: {key.id_cheie}")
+                        else:
+                            raise Exception(f"Key generation failed: {process.stderr}")
                             
-                            print(f"Private key saved to database with ID: {private_key.id_cheie}")
-                            print(f"Public key saved to database with ID: {public_key.id_cheie}")
+                    else:  # Asymmetric
+                        # Generate temporary files for key pair
+                        temp_dir = "temp_keys"
+                        os.makedirs(temp_dir, exist_ok=True)
+                        private_path = os.path.join(temp_dir, f"private_{uuid.uuid4()}.pem")
+                        public_path = os.path.join(temp_dir, f"public_{uuid.uuid4()}.pem")
+                        
+                        cmd = algo_info['key_generation'].format(
+                            private=private_path,
+                            public=public_path
+                        )
+                        
+                        print(f"Running command: {cmd}")
+                        process = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                        
+                        if process.returncode == 0:
+                            print("Generated key pair")
                             
-                            self.update_keys_list(algo_name)
-                        finally:
-                            # Clean up temporary files
                             try:
-                                os.remove(private_path)
-                                os.remove(public_path)
-                                os.rmdir(temp_dir)
-                            except:
-                                pass
-                    else:
-                        raise Exception(f"Key generation failed: {process.stderr}")
+                                # Read key contents
+                                with open(private_path, 'rb') as f:
+                                    private_key_content = f.read()
+                                with open(public_path, 'rb') as f:
+                                    public_key_content = f.read()
+                                
+                                # Save keys to database
+                                print("Saving keys to database...")
+                                
+                                # Save private key
+                                private_key = Chei(
+                                    id_cheie=str(uuid.uuid4()),
+                                    id_algoritm=algo.id_algoritm,
+                                    nume=f"{dialog.result['name']}_private",
+                                    cheie=private_key_content,
+                                    data_creare=datetime.now(),
+                                    expirare=dialog.result['expiration'],
+                                    tip_cheie=TipCheie.PRIVATA
+                                )
+                                db.add(private_key)
+                                
+                                # Save public key
+                                public_key = Chei(
+                                    id_cheie=str(uuid.uuid4()),
+                                    id_algoritm=algo.id_algoritm,
+                                    nume=f"{dialog.result['name']}_public",
+                                    cheie=public_key_content,
+                                    data_creare=datetime.now(),
+                                    expirare=dialog.result['expiration'],
+                                    tip_cheie=TipCheie.PUBLICA
+                                )
+                                db.add(public_key)
+                                db.commit()
+                                
+                                print(f"Private key saved to database with ID: {private_key.id_cheie}")
+                                print(f"Public key saved to database with ID: {public_key.id_cheie}")
+                            finally:
+                                # Clean up temporary files
+                                try:
+                                    os.remove(private_path)
+                                    os.remove(public_path)
+                                    os.rmdir(temp_dir)
+                                except:
+                                    pass
+                        else:
+                            raise Exception(f"Key generation failed: {process.stderr}")
             finally:
                 db.close()
                     
         except Exception as e:
             print(f"Error generating key: {str(e)}")
             messagebox.showerror("Error", str(e))
+        
+        self.update_keys_list(algo_name)
 
     def calculate_file_hash(self, file_path):
         sha256_hash = hashlib.sha256()
@@ -602,155 +675,179 @@ class EncryptionManagerGUI:
                 print(f"Key type: {key.tip_cheie}")
                 print(f"Key content length: {len(key.cheie)} bytes")
                 
-                # Create temporary directory for keys
-                temp_dir = "temp_keys"
-                os.makedirs(temp_dir, exist_ok=True)
-                print(f"Created temporary directory: {temp_dir}")
+                start_time = time.time()
                 
-                try:
-                    # For RSA, we need to create a temporary key file
-                    if result['algorithm'] == "RSA":
-                        key_path = os.path.join(temp_dir, f"key_{uuid.uuid4()}.pem")
-                        print(f"Creating temporary key file: {key_path}")
-                        
-                        # Write key content to temporary file
-                        with open(key_path, 'wb') as f:
-                            f.write(key.cheie)
-                        print(f"Wrote {len(key.cheie)} bytes to key file")
-                        
-                        # Build and print the command
-                        cmd_template = algo_info['encrypt_cmd'] if result['operation'] == 'Encrypt' else algo_info['decrypt_cmd']
-                        cmd = cmd_template.format(
-                            input=result['file_path'],
-                            output=result['output_path'],
-                            key=key_path
-                        )
-                    else:  # AES
-                        # For AES, use the key value directly (do not create a temp file)
-                        key_value = key.cheie.decode('utf-8')
-                        print(f"Using AES key value: {key_value}")
-                        
-                        # Build and print the command
-                        cmd_template = algo_info['encrypt_cmd'] if result['operation'] == 'Encrypt' else algo_info['decrypt_cmd']
-                        cmd = cmd_template.format(
-                            input=result['file_path'],
-                            output=result['output_path'],
-                            key=key_value
-                        )
+                if result['algorithm'] in ["AES-Libre", "RSA-Libre"]:
+                    # Use LibreWrapper for encryption/decryption
+                    from database.libre_wrapper import LibreWrapper
+                    wrapper = LibreWrapper()
                     
-                    print("\n" + "="*80)
-                    print("COMANDA PENTRU CMD (COPY-PASTE):")
-                    print("="*80)
-                    print(cmd)
-                    print("="*80 + "\n")
-                    
-                    # Execute the command
-                    print("Executing command...")
-                    start_time = time.time()
-                    
-                    # Split command into list for better execution
-                    if result['algorithm'] == "RSA":
-                        cmd_parts = cmd.split()
-                        print(f"Command parts: {cmd_parts}")
-                        process = subprocess.run(
-                            cmd_parts,
-                            capture_output=True,
-                            text=True
+                    if result['operation'] == 'Encrypt':
+                        wrapper.encrypt(
+                            algorithm=result['algorithm'],
+                            input_file=result['file_path'],
+                            output_file=result['output_path'],
+                            key=key.cheie,
+                            key_type=key.tip_cheie
                         )
-                    else:  # AES
-                        print(f"Executing AES command with shell=True")
-                        process = subprocess.run(
-                            cmd,
-                            shell=True,
-                            capture_output=True,
-                            text=True
+                    else:  # Decrypt
+                        wrapper.decrypt(
+                            algorithm=result['algorithm'],
+                            input_file=result['file_path'],
+                            output_file=result['output_path'],
+                            key=key.cheie,
+                            key_type=key.tip_cheie
                         )
+                else:
+                    # Use existing OpenSSL implementation
+                    # Create temporary directory for keys
+                    temp_dir = "temp_keys"
+                    os.makedirs(temp_dir, exist_ok=True)
+                    print(f"Created temporary directory: {temp_dir}")
                     
-                    end_time = time.time()
-                    
-                    print(f"Command return code: {process.returncode}")
-                    print(f"Command output: {process.stdout}")
-                    print(f"Command error: {process.stderr}")
-                    
-                    if process.returncode == 0:
-                        print("Operation completed successfully")
-                        
-                        # Verify the output file exists and has content
-                        if not os.path.exists(result['output_path']):
-                            raise Exception("Output file was not created")
-                        
-                        file_size = os.path.getsize(result['output_path'])
-                        if file_size == 0:
-                            raise Exception("Output file is empty")
-                        
-                        print(f"Output file created successfully: {result['output_path']} ({file_size} bytes)")
-                        
-                        # Calculate file hash
-                        print("Calculating file hash...")
-                        file_hash = self.calculate_file_hash(result['output_path'])
-                        print(f"File hash: {file_hash}")
-                        
-                        # Get algorithm from database
-                        algo = db.query(Algoritmi).filter(Algoritmi.nume_algoritm == result['algorithm']).first()
-                        if not algo:
-                            raise Exception(f"Algorithm {result['algorithm']} not found in database")
-                        
-                        # Create and save file in database
-                        file = Fisiere(
-                            id_fisier=str(uuid.uuid4()),
-                            name_fisier=os.path.basename(result['output_path']),
-                            locate_fisier=result['output_path'],
-                            hash=file_hash,
-                            dimensiune=file_size,
-                            status=StatusFisier.CRIPTAT if result['operation'] == 'Encrypt' else StatusFisier.DECRIPTAT,
-                            data_creare=datetime.now()
-                        )
-                        db.add(file)
-                        db.flush()
-                        print(f"File info saved to database: {result['output_path']}")
-                        
-                        # Create file operation and performance
-                        from database.operations import create_file_operation
-                        operation, error = create_file_operation(
-                            db=db,
-                            file_id=file.id_fisier,
-                            algorithm_id=algo.id_algoritm,
-                            key_id=key.id_cheie,
-                            operation_type=result['operation'],
-                            performance_data={
-                                'encrypt_time': end_time - start_time if result['operation'] == 'Encrypt' else None,
-                                'decrypt_time': end_time - start_time if result['operation'] == 'Decrypt' else None,
-                                'memory_used': 0  # TODO: Implement memory measurement
-                            },
-                            output_path=result['output_path']
-                        )
-                        
-                        if error:
-                            raise Exception(f"Failed to save operation: {error}")
-                        
-                        print(f"Operation saved to database with ID: {operation.id}")
-                        
-                        # Update files list
-                        print("Updating files list...")
-                        self.refresh_files_list()
-                        
-                        messagebox.showinfo("Success", f"File {result['operation'].lower()}ed successfully!\nOutput path: {result['output_path']}")
-                    else:
-                        print(f"Operation failed with error: {process.stderr}")
-                        raise Exception(f"Operation failed: {process.stderr}")
-                finally:
-                    # Clean up temporary files
-                    if 'key_path' in locals():
-                        try:
-                            os.remove(key_path)
-                            print(f"Removed temporary key file: {key_path}")
-                        except Exception as e:
-                            print(f"Warning: Failed to remove temporary key file: {str(e)}")
                     try:
-                        os.rmdir(temp_dir)
-                        print(f"Removed temporary directory: {temp_dir}")
-                    except Exception as e:
-                        print(f"Warning: Failed to remove temporary directory: {str(e)}")
+                        # For RSA, we need to create a temporary key file
+                        if result['algorithm'] == "RSA":
+                            key_path = os.path.join(temp_dir, f"key_{uuid.uuid4()}.pem")
+                            print(f"Creating temporary key file: {key_path}")
+                            
+                            # Write key content to temporary file
+                            with open(key_path, 'wb') as f:
+                                f.write(key.cheie)
+                            print(f"Wrote {len(key.cheie)} bytes to key file")
+                            
+                            # Build and print the command
+                            cmd_template = algo_info['encrypt_cmd'] if result['operation'] == 'Encrypt' else algo_info['decrypt_cmd']
+                            cmd = cmd_template.format(
+                                input=result['file_path'],
+                                output=result['output_path'],
+                                key=key_path
+                            )
+                        else:  # AES
+                            # For AES, use the key value directly (do not create a temp file)
+                            key_value = key.cheie.decode('utf-8')
+                            print(f"Using AES key value: {key_value}")
+                            
+                            # Build and print the command
+                            cmd_template = algo_info['encrypt_cmd'] if result['operation'] == 'Encrypt' else algo_info['decrypt_cmd']
+                            cmd = cmd_template.format(
+                                input=result['file_path'],
+                                output=result['output_path'],
+                                key=key_value
+                            )
+                        
+                        print("\n" + "="*80)
+                        print("COMANDA PENTRU CMD (COPY-PASTE):")
+                        print("="*80)
+                        print(cmd)
+                        print("="*80 + "\n")
+                        
+                        # Execute the command
+                        print("Executing command...")
+                        
+                        # Split command into list for better execution
+                        if result['algorithm'] == "RSA":
+                            cmd_parts = cmd.split()
+                            print(f"Command parts: {cmd_parts}")
+                            process = subprocess.run(
+                                cmd_parts,
+                                capture_output=True,
+                                text=True
+                            )
+                        else:  # AES
+                            print(f"Executing AES command with shell=True")
+                            process = subprocess.run(
+                                cmd,
+                                shell=True,
+                                capture_output=True,
+                                text=True
+                            )
+                        
+                        if process.returncode != 0:
+                            raise Exception(f"Operation failed: {process.stderr}")
+                    finally:
+                        # Clean up temporary files
+                        if 'key_path' in locals():
+                            try:
+                                os.remove(key_path)
+                                print(f"Removed temporary key file: {key_path}")
+                            except Exception as e:
+                                print(f"Warning: Failed to remove temporary key file: {str(e)}")
+                        try:
+                            os.rmdir(temp_dir)
+                            print(f"Removed temporary directory: {temp_dir}")
+                        except Exception as e:
+                            print(f"Warning: Failed to remove temporary directory: {str(e)}")
+                
+                end_time = time.time()
+                
+                # Verify the output file exists and has content
+                if not os.path.exists(result['output_path']):
+                    raise Exception("Output file was not created")
+                
+                file_size = os.path.getsize(result['output_path'])
+                if file_size == 0:
+                    raise Exception("Output file is empty")
+                
+                print(f"Output file created successfully: {result['output_path']} ({file_size} bytes)")
+                
+                # Calculate file hash
+                print("Calculating file hash...")
+                file_hash = self.calculate_file_hash(result['output_path'])
+                print(f"File hash: {file_hash}")
+                
+                # Get algorithm from database
+                algo = db.query(Algoritmi).filter(Algoritmi.nume_algoritm == result['algorithm']).first()
+                if not algo:
+                    raise Exception(f"Algorithm {result['algorithm']} not found in database")
+                
+                # Get framework from database
+                framework_name = "LibreWrapper" if result['algorithm'] in ["AES-Libre", "RSA-Libre"] else "OpenSSL"
+                framework = db.query(Frameworks).filter(Frameworks.nume_framework == framework_name).first()
+                if not framework:
+                    raise Exception(f"Framework {framework_name} not found in database")
+                
+                # Create and save file in database
+                file = Fisiere(
+                    id_fisier=str(uuid.uuid4()),
+                    name_fisier=os.path.basename(result['output_path']),
+                    locate_fisier=result['output_path'],
+                    hash=file_hash,
+                    dimensiune=file_size,
+                    status=StatusFisier.CRIPTAT if result['operation'] == 'Encrypt' else StatusFisier.DECRIPTAT,
+                    data_creare=datetime.now()
+                )
+                db.add(file)
+                db.flush()
+                print(f"File info saved to database: {result['output_path']}")
+                
+                # Create file operation and performance
+                from database.operations import create_file_operation
+                operation, error = create_file_operation(
+                    db=db,
+                    file_id=file.id_fisier,
+                    algorithm_id=algo.id_algoritm,
+                    key_id=key.id_cheie,
+                    operation_type=result['operation'],
+                    performance_data={
+                        'encrypt_time': end_time - start_time if result['operation'] == 'Encrypt' else None,
+                        'decrypt_time': end_time - start_time if result['operation'] == 'Decrypt' else None,
+                        'memory_used': 0  # TODO: Implement memory measurement
+                    },
+                    output_path=result['output_path'],
+                    framework_id=framework.id_framework
+                )
+                
+                if error:
+                    raise Exception(f"Failed to save operation: {error}")
+                
+                print(f"Operation saved to database with ID: {operation.id}")
+                
+                # Update files list
+                print("Updating files list...")
+                self.refresh_files_list()
+                
+                messagebox.showinfo("Success", f"File {result['operation'].lower()}ed successfully!\nOutput path: {result['output_path']}")
             finally:
                 db.close()
                 
@@ -808,9 +905,11 @@ class EncryptionManagerGUI:
                 return
             # Get algorithm name
             algo = db.query(Algoritmi).filter(Algoritmi.id_algoritm == perf.id_algoritm).first()
+            # Get framework name
+            framework = db.query(Frameworks).filter(Frameworks.id_framework == perf.id_framework).first()
             performance_data = {
                 'algorithm': algo.nume_algoritm if algo else '-',
-                'framework': 'OpenSSL',
+                'framework': framework.nume_framework if framework else '-',
                 'encrypt_time': perf.timp_criptare,
                 'decrypt_time': perf.timp_decriptare,
                 'memory': perf.memorie_utilizata,

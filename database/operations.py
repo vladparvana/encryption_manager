@@ -18,7 +18,8 @@ def create_file_operation(
     key_id: str,
     operation_type: str,
     performance_data: dict,
-    output_path: str = None
+    output_path: str = None,
+    framework_id: str = None
 ) -> Tuple[Optional[FisierAlgorithmCheie], str]:
     try:
         # Verify all entities exist
@@ -41,28 +42,31 @@ def create_file_operation(
         perf_id = str(uuid.uuid4())
 
         # Create performance record first
-        framework = db.query(Frameworks).filter(Frameworks.nume_framework == 'OpenSSL').first()
-        if not framework:
-            # Use algorithm's encrypt/decrypt commands if available
-            encrypt_cmd = getattr(algorithm, 'comanda_criptare', None)
-            decrypt_cmd = getattr(algorithm, 'comanda_decriptare', None)
-            if not encrypt_cmd or not decrypt_cmd:
-                if hasattr(algorithm, 'encrypt_cmd') and hasattr(algorithm, 'decrypt_cmd'):
-                    encrypt_cmd = algorithm.encrypt_cmd
-                    decrypt_cmd = algorithm.decrypt_cmd
-                else:
-                    encrypt_cmd = 'openssl enc -aes-256-cbc -salt -in "{input}" -out "{output}" -pass pass:{key}'
-                    decrypt_cmd = 'openssl enc -aes-256-cbc -d -salt -in "{input}" -out "{output}" -pass pass:{key}'
-            framework = Frameworks(
-                id_framework=str(uuid.uuid4()),
-                nume_framework='OpenSSL',
-                tip_framework='OPENSSL',
-                versiune='1.1.1',
-                comanda_criptare=encrypt_cmd,
-                comanda_decriptare=decrypt_cmd
-            )
-            db.add(framework)
-            db.commit()
+        if framework_id:
+            framework = db.query(Frameworks).get(framework_id)
+        else:
+            framework = db.query(Frameworks).filter(Frameworks.nume_framework == 'OpenSSL').first()
+            if not framework:
+                # Use algorithm's encrypt/decrypt commands if available
+                encrypt_cmd = getattr(algorithm, 'comanda_criptare', None)
+                decrypt_cmd = getattr(algorithm, 'comanda_decriptare', None)
+                if not encrypt_cmd or not decrypt_cmd:
+                    if hasattr(algorithm, 'encrypt_cmd') and hasattr(algorithm, 'decrypt_cmd'):
+                        encrypt_cmd = algorithm.encrypt_cmd
+                        decrypt_cmd = algorithm.decrypt_cmd
+                    else:
+                        encrypt_cmd = 'openssl enc -aes-256-cbc -salt -in "{input}" -out "{output}" -pass pass:{key}'
+                        decrypt_cmd = 'openssl enc -aes-256-cbc -d -salt -in "{input}" -out "{output}" -pass pass:{key}'
+                framework = Frameworks(
+                    id_framework=str(uuid.uuid4()),
+                    nume_framework='OpenSSL',
+                    tip_framework='OPENSSL',
+                    versiune='1.1.1',
+                    comanda_criptare=encrypt_cmd,
+                    comanda_decriptare=decrypt_cmd
+                )
+                db.add(framework)
+                db.commit()
 
         performance = Performante(
             id_performanta=perf_id,
